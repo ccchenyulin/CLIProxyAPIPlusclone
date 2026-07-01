@@ -41,3 +41,30 @@ func DoCodeBuddyLogin(cfg *config.Config, options *LoginOptions) {
 	}
 	fmt.Println("CodeBuddy authentication successful!")
 }
+
+// DoCodeBuddyIntlLogin triggers the browser OAuth polling flow for CodeBuddy International and saves tokens.
+func DoCodeBuddyIntlLogin(cfg *config.Config, options *LoginOptions) {
+	if options == nil {
+		options = &LoginOptions{}
+	}
+
+	manager := newAuthManager()
+	authOpts := &sdkAuth.LoginOptions{
+		NoBrowser: options.NoBrowser,
+		Metadata:  map[string]string{},
+	}
+
+	record, savedPath, err := manager.Login(context.Background(), "codebuddy-intl", cfg, authOpts)
+	if err != nil {
+		log.Errorf("CodeBuddy International authentication failed: %v", err)
+		return
+	}
+
+	if savedPath != "" {
+		fmt.Printf("Authentication saved to %s\n", savedPath)
+	}
+	if record != nil && record.Label != "" {
+		fmt.Printf("Authenticated as %s\n", record.Label)
+	}
+	fmt.Println("CodeBuddy International authentication successful!")
+}

@@ -118,6 +118,7 @@ func main() {
 	var githubCopilotLogin bool
 	var clineLogin bool
 	var codeBuddyLogin bool
+	var codeBuddyIntlLogin bool
 	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
@@ -164,6 +165,7 @@ func main() {
 	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
 	flag.BoolVar(&clineLogin, "cline-login", false, "Login to Cline using OAuth")
 	flag.BoolVar(&codeBuddyLogin, "codebuddy-login", false, "Login to CodeBuddy using browser OAuth flow")
+	flag.BoolVar(&codeBuddyIntlLogin, "codebuddy-intl-login", false, "Login to CodeBuddy International using browser OAuth flow")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -723,6 +725,9 @@ func main() {
 	} else if codeBuddyLogin {
 		// Handle CodeBuddy login
 		cmd.DoCodeBuddyLogin(cfg, options)
+	} else if codeBuddyIntlLogin {
+		// Handle CodeBuddy International login
+		cmd.DoCodeBuddyIntlLogin(cfg, options)
 	} else if codexLogin {
 		// Handle Codex login
 		cmd.DoCodexLogin(cfg, options)

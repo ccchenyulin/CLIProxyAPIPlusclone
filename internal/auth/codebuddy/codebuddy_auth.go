@@ -20,9 +20,11 @@ import (
 )
 
 const (
-	BaseURL       = "https://copilot.tencent.com"
-	DefaultDomain = "www.codebuddy.cn"
-	UserAgent     = "CLI/2.63.2 CodeBuddy/2.63.2"
+	BaseURL           = "https://copilot.tencent.com"
+	DefaultDomain     = "www.codebuddy.cn"
+	IntlBaseURL       = "https://www.codebuddy.ai"
+	IntlDefaultDomain = "www.codebuddy.ai"
+	UserAgent         = "CLI/2.63.2 CodeBuddy/2.63.2"
 
 	codeBuddyStatePath   = "/v2/plugin/auth/state"
 	codeBuddyTokenPath   = "/v2/plugin/auth/token"
@@ -34,17 +36,34 @@ const (
 )
 
 type CodeBuddyAuth struct {
-	httpClient *http.Client
-	cfg        *config.Config
-	baseURL    string
+	httpClient    *http.Client
+	cfg           *config.Config
+	baseURL       string
+	defaultDomain string
+	authType      string
 }
 
 func NewCodeBuddyAuth(cfg *config.Config) *CodeBuddyAuth {
+	return newCodeBuddyAuthWithBaseURL(cfg, BaseURL, DefaultDomain, "codebuddy")
+}
+
+func NewCodeBuddyIntlAuth(cfg *config.Config) *CodeBuddyAuth {
+	return newCodeBuddyAuthWithBaseURL(cfg, IntlBaseURL, IntlDefaultDomain, "codebuddy-intl")
+}
+
+func newCodeBuddyAuthWithBaseURL(cfg *config.Config, baseURL, defaultDomain, authType string) *CodeBuddyAuth {
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	if cfg != nil {
 		httpClient = util.SetProxy(&cfg.SDKConfig, httpClient)
 	}
-	return &CodeBuddyAuth{httpClient: httpClient, cfg: cfg, baseURL: BaseURL}
+	return &CodeBuddyAuth{httpClient: httpClient, cfg: cfg, baseURL: baseURL, defaultDomain: defaultDomain, authType: authType}
+}
+
+func (a *CodeBuddyAuth) DefaultDomain() string {
+	if a.defaultDomain != "" {
+		return a.defaultDomain
+	}
+	return DefaultDomain
 }
 
 // AuthState holds the state and auth URL returned by the auth state API.
@@ -67,7 +86,7 @@ func (a *CodeBuddyAuth) FetchAuthState(ctx context.Context) (*AuthState, error) 
 	req.Header.Set("Accept", "application/json, text/plain, */*")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
-	req.Header.Set("X-Domain", "copilot.tencent.com")
+	req.Header.Set("X-Domain", a.baseURL)
 	req.Header.Set("X-No-Authorization", "true")
 	req.Header.Set("X-No-User-Id", "true")
 	req.Header.Set("X-No-Enterprise-Id", "true")
@@ -189,6 +208,7 @@ func (a *CodeBuddyAuth) PollForToken(ctx context.Context, state string) (*CodeBu
 				return nil, fmt.Errorf("%w: empty data in response", ErrTokenFetchFailed)
 			}
 			userID, _ := a.DecodeUserID(result.Data.AccessToken)
+			email, _ := a.DecodeJWTClaims(result.Data.AccessToken)
 			return &CodeBuddyTokenStorage{
 				AccessToken:  result.Data.AccessToken,
 				RefreshToken: result.Data.RefreshToken,
@@ -196,7 +216,8 @@ func (a *CodeBuddyAuth) PollForToken(ctx context.Context, state string) (*CodeBu
 				TokenType:    result.Data.TokenType,
 				Domain:       result.Data.Domain,
 				UserID:       userID,
-				Type:         "codebuddy",
+				Email:        email,
+				Type:         a.authType,
 			}, nil
 		case codeLoginPending:
 			// continue polling
@@ -231,11 +252,36 @@ func (a *CodeBuddyAuth) DecodeUserID(accessToken string) (string, error) {
 	return claims.Sub, nil
 }
 
+// DecodeJWTClaims decodes the email and name from a JWT access token.
+func (a *CodeBuddyAuth) DecodeJWTClaims(accessToken string) (email string, name string) {
+	parts := strings.Split(accessToken, ".")
+	if len(parts) < 2 {
+		return "", ""
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return "", ""
+	}
+	var claims struct {
+		Email             string `json:"email"`
+		Name              string `json:"name"`
+		PreferredUsername string `json:"preferred_username"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", ""
+	}
+	email = claims.Email
+	if email == "" {
+		email = claims.PreferredUsername
+	}
+	return email, claims.Name
+}
+
 // RefreshToken exchanges a refresh token for a new access token.
 // It calls POST /v2/plugin/auth/token/refresh with the required headers.
 func (a *CodeBuddyAuth) RefreshToken(ctx context.Context, accessToken, refreshToken, userID, domain string) (*CodeBuddyTokenStorage, error) {
 	if domain == "" {
-		domain = DefaultDomain
+		domain = a.DefaultDomain()
 	}
 	refreshURL := fmt.Sprintf("%s%s", a.baseURL, codeBuddyRefreshPath)
 	body := []byte("{}")
@@ -306,6 +352,7 @@ func (a *CodeBuddyAuth) RefreshToken(ctx context.Context, accessToken, refreshTo
 	if newUserID == "" {
 		newUserID = userID
 	}
+	newEmail, _ := a.DecodeJWTClaims(result.Data.AccessToken)
 	tokenDomain := result.Data.Domain
 	if tokenDomain == "" {
 		tokenDomain = domain
@@ -319,7 +366,8 @@ func (a *CodeBuddyAuth) RefreshToken(ctx context.Context, accessToken, refreshTo
 		TokenType:        result.Data.TokenType,
 		Domain:           tokenDomain,
 		UserID:           newUserID,
-		Type:             "codebuddy",
+		Email:            newEmail,
+		Type:             a.authType,
 	}, nil
 }
 
