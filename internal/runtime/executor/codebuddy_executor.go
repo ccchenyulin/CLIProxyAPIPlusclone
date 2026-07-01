@@ -18,6 +18,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -363,10 +364,13 @@ func (e *CodeBuddyExecutor) applyHeaders(req *http.Request, accessToken, userID,
 	req.Header.Set("X-User-Id", userID)
 	req.Header.Set("X-Domain", domain)
 	req.Header.Set("X-Product", "SaaS")
-	req.Header.Set("X-IDE-Type", "CLI")
-	req.Header.Set("X-IDE-Name", "CLI")
+	req.Header.Set("X-IDE-Type", "vscode")
+	req.Header.Set("X-IDE-Name", "CodeBuddy CN")
 	req.Header.Set("X-IDE-Version", "2.63.2")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+	req.Header.Set("X-Request-Trace-Id", uuid.New().String()[:16])
+	req.Header.Set("Origin", "https://"+domain)
+	req.Header.Set("Referer", "https://"+domain+"/")
 }
 
 type openAIChatStreamChoiceAccumulator struct {

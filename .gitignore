@@ -76,11 +76,12 @@ _bmad-output/*
 
 # 로컬 세션 산출물
 .gjc/
-
 # docker
 docker-compose.override.yml
-
 
 # Local LLM Wiki vault
 .llm-wiki
 .omo/
+
+# 编译产物
+CLIProxyAPIPlus
