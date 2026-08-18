@@ -190,6 +190,9 @@ func (s *Service) registerModelsForAuthWithCache(ctx context.Context, a *coreaut
 			models = executor.FilterCursorModels(registry.GetCursorModels())
 		}
 		models = applyExcludedModels(models, excluded)
+	case "codebuddy":
+		models = registry.GetCodeBuddyModels()
+		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
 		if entry := s.resolveConfigXAIKey(a); entry != nil {
