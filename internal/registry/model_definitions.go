@@ -316,6 +316,18 @@ func GetCodeBuddyModels() []*ModelInfo {
 			MaxCompletionTokens: 32768,
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
+		{
+			ID:                  "hy4-preview",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "Hy4 Preview",
+			Description:         "Tencent Hunyuan Hy4 Preview via CodeBuddy",
+			ContextLength:       1048576,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
 	}
 }
 
