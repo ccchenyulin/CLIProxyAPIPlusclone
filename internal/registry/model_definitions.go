@@ -317,6 +317,18 @@ func GetCodeBuddyModels() []*ModelInfo {
 			SupportedEndpoints:  []string{"/chat/completions"},
 		},
 		{
+			ID:                  "deepseek-v4.1-flash",
+			Object:              "model",
+			Created:             now,
+			OwnedBy:             "tencent",
+			Type:                "codebuddy",
+			DisplayName:         "DeepSeek V4.1 Flash",
+			Description:         "DeepSeek V4.1 Flash via CodeBuddy",
+			ContextLength:       1048576,
+			MaxCompletionTokens: 32768,
+			SupportedEndpoints:  []string{"/chat/completions"},
+		},
+		{
 			ID:                  "hy4-preview",
 			Object:              "model",
 			Created:             now,
