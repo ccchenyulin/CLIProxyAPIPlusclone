@@ -4,10 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 
@@ -27,7 +30,43 @@ import (
 const (
 	codeBuddyChatPath = "/v2/chat/completions"
 	codeBuddyAuthType = "codebuddy"
+
+	// CodeBuddy CLI version aligned with the latest public CodeBuddy Code package
+	// (verified against community reverse-engineered proxies in 2026-09: orangeboyChen/
+	// codebuddy2api uses 2.137.1, JobinBai/codebuddycli-proxy uses 2.130.0). Only used
+	// by the international executor path.
+	codeBuddyCLIVersion = "2.137.1"
+	codeBuddyIntlUserAgent = "CLI/" + codeBuddyCLIVersion + " CodeBuddy/" + codeBuddyCLIVersion
 )
+
+// randomHex32 returns 32 lowercase hex chars (used for 32-hex request/conversation IDs).
+func randomHex32() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// randomHex16 returns 16 lowercase hex chars (used for OTel span IDs).
+func randomHex16() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+// randomUUIDCompact returns a UUID stripped of hyphens (32 hex chars).
+func randomUUIDCompact() string {
+	return strings.ReplaceAll(uuid.New().String(), "-", "")
+}
+
+// codeBuddyBaseURLForDomain picks the correct CodeBuddy API base URL based on
+// the account's domain field. International accounts use www.codebuddy.ai;
+// everything else (CN or empty) defaults to the CN API at copilot.tencent.com.
+func codeBuddyBaseURLForDomain(domain string) string {
+	if strings.HasSuffix(domain, "codebuddy.ai") {
+		return codebuddy.IntlBaseURL
+	}
+	return codebuddy.BaseURL
+}
 
 // CodeBuddyExecutor handles requests to the CodeBuddy API.
 type CodeBuddyExecutor struct {
@@ -125,7 +164,7 @@ func (e *CodeBuddyExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth
 		return resp, err
 	}
 
-	url := codebuddy.BaseURL + codeBuddyChatPath
+	url := codeBuddyBaseURLForDomain(domain) + codeBuddyChatPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return resp, err
@@ -222,7 +261,7 @@ func (e *CodeBuddyExecutor) ExecuteStream(ctx context.Context, auth *cliproxyaut
 		return nil, err
 	}
 
-	url := codebuddy.BaseURL + codeBuddyChatPath
+	url := codeBuddyBaseURLForDomain(domain) + codeBuddyChatPath
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
 	if err != nil {
 		return nil, err
@@ -327,7 +366,13 @@ func (e *CodeBuddyExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth
 
 	accessToken, userID, domain := codeBuddyCredentials(auth)
 
+	// Pick the auth service that matches the account's region: international
+	// accounts must refresh against www.codebuddy.ai, CN accounts against
+	// copilot.tencent.com. Using the wrong host makes the refresh call fail.
 	authSvc := codebuddy.NewCodeBuddyAuth(e.cfg)
+	if strings.HasSuffix(domain, "codebuddy.ai") {
+		authSvc = codebuddy.NewCodeBuddyIntlAuth(e.cfg)
+	}
 	storage, err := authSvc.RefreshToken(ctx, accessToken, refreshToken, userID, domain)
 	if err != nil {
 		return nil, fmt.Errorf("codebuddy: token refresh failed: %w", err)
@@ -356,7 +401,14 @@ func (e *CodeBuddyExecutor) CountTokens(_ context.Context, _ *cliproxyauth.Auth,
 }
 
 // applyHeaders sets required headers for CodeBuddy API requests.
+// CN accounts keep the historical header set (stable for months, no risk of
+// regression); international accounts use a full reverse-engineered CLI header
+// profile aligned with community projects (orangeboyChen/codebuddy2api 2.137.1).
 func (e *CodeBuddyExecutor) applyHeaders(req *http.Request, accessToken, userID, domain string) {
+	if strings.HasSuffix(domain, "codebuddy.ai") {
+		e.applyHeadersIntl(req, accessToken, userID, domain)
+		return
+	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
@@ -369,6 +421,85 @@ func (e *CodeBuddyExecutor) applyHeaders(req *http.Request, accessToken, userID,
 	req.Header.Set("X-IDE-Version", "2.63.2")
 	req.Header.Set("X-Requested-With", "XMLHttpRequest")
 	req.Header.Set("X-Request-Trace-Id", uuid.New().String()[:16])
+	req.Header.Set("Origin", "https://"+domain)
+	req.Header.Set("Referer", "https://"+domain+"/")
+}
+
+// applyHeadersIntl builds the full CLI-fingerprint header set for international
+// CodeBuddy accounts (www.codebuddy.ai). Aligned with the packet-captured request
+// headers observed by community proxies orangeboyChen/codebuddy2api and
+// JobinBai/codebuddycli-proxy. Includes: OpenAI Stainless SDK fingerprint,
+// three-tier session IDs, agent intent/purpose, and OTel + Zipkin B3 tracing.
+func (e *CodeBuddyExecutor) applyHeadersIntl(req *http.Request, accessToken, userID, domain string) {
+	// Single-request ID bundle. Conversation IDs are generated per HTTP request
+	// here because CLIProxyAPI does not maintain cross-request session state; the
+	// invariants that matter for upstream risk control are per-request consistency
+	// (same message-id for X-Request-ID and X-Conversation-Message-ID, etc.).
+	conversationID := uuid.New().String()   // UUID with hyphens, session-level
+	conversationReqID := randomUUIDCompact() // 32 hex, turn-level
+	messageID := randomUUIDCompact()          // 32 hex, request-level (also used as X-Request-ID)
+
+	// OTel + Zipkin B3 trace context.
+	traceID := randomUUIDCompact()
+	spanID := randomHex16()
+	parentSpanID := randomHex16()
+
+	// --- OpenAI SDK / Chromium-ish basics ---
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Requested-With", "XMLHttpRequest")
+
+	// --- OpenAI Stainless client fingerprint ---
+	req.Header.Set("x-stainless-arch", runtime.GOARCH)
+	req.Header.Set("x-stainless-lang", "js")
+	req.Header.Set("x-stainless-os", "Linux")
+	req.Header.Set("x-stainless-package-version", codeBuddyCLIVersion)
+	req.Header.Set("x-stainless-retry-count", "0")
+	req.Header.Set("x-stainless-timeout", "600")
+	req.Header.Set("x-stainless-runtime", "node")
+	req.Header.Set("x-stainless-runtime-version", "v18.0.0")
+
+	// --- Session identifiers (three-tier) ---
+	req.Header.Set("X-Conversation-ID", conversationID)
+	req.Header.Set("X-Conversation-Request-ID", conversationReqID)
+	req.Header.Set("X-Conversation-Message-ID", messageID)
+	req.Header.Set("X-Agent-Intent", "craft")
+	req.Header.Set("X-Agent-Purpose", "conversation")
+
+	// --- IDE / product identity (CLI, not desktop IDE) ---
+	req.Header.Set("X-IDE-Type", "CLI")
+	req.Header.Set("X-IDE-Name", "CLI")
+	req.Header.Set("X-IDE-Version", codeBuddyCLIVersion)
+	req.Header.Set("X-Product", "SaaS")
+	req.Header.Set("X-Product-Version", codeBuddyCLIVersion)
+	req.Header.Set("X-Client-Platform", "web")
+	req.Header.Set("X-Private-Data", "false")
+
+	// --- Request-level IDs (X-Request-ID and X-Conversation-Message-ID share value) ---
+	req.Header.Set("X-Request-ID", messageID)
+
+	// --- Distributed tracing: W3C traceparent + Zipkin B3 ---
+	req.Header.Set("traceparent", fmt.Sprintf("00-%s-%s-01", traceID, spanID))
+	req.Header.Set("b3", fmt.Sprintf("%s-%s-1-%s", traceID, spanID, parentSpanID))
+	req.Header.Set("x-b3-traceid", traceID)
+	req.Header.Set("x-b3-parentspanid", parentSpanID)
+	req.Header.Set("x-b3-spanid", spanID)
+	req.Header.Set("x-b3-sampled", "1")
+	req.Header.Set("x-trace-id", traceID)
+
+	// --- Auth / identity ---
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	if userID != "" {
+		req.Header.Set("X-User-Id", userID)
+	}
+	req.Header.Set("X-Domain", domain)
+
+	// --- User-Agent (real CLI uses `axios/1.18.1` after OpenAI SDK UA is stripped;
+	// we keep the CLI/<version> CodeBuddy/<version> form used by
+	// orangeboyChen/codebuddy2api, which mirrors the CodeBuddy Code npm package)
+	req.Header.Set("User-Agent", codeBuddyIntlUserAgent)
+
+	// --- Origin / Referer ---
 	req.Header.Set("Origin", "https://"+domain)
 	req.Header.Set("Referer", "https://"+domain+"/")
 }
